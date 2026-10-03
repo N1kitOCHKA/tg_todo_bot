@@ -4,7 +4,7 @@ import os
 from telebot import types
 from dotenv import load_dotenv
 
-load_dotenv()  # читает файл .env
+load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
 if not TOKEN:
@@ -39,23 +39,27 @@ def save_user_tasks(user_id, tasks):
     save_all(data)
 
 
-# ---------- Reply-клавиатура (внизу экрана) ----------
+# ---------- Клавиатуры ----------
 def main_keyboard():
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add(
+        types.KeyboardButton("➕ Добавить задачу"),
         types.KeyboardButton("📋 Список"),
         types.KeyboardButton("🗑 Очистить всё"),
     )
     return kb
 
 
-# ---------- Inline-клавиатура под списком задач ----------
+def cancel_keyboard():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(types.KeyboardButton("❌ Отмена"))
+    return kb
+
+
 def tasks_keyboard(tasks):
-    """Собирает inline-клавиатуру: для каждой задачи две кнопки — ✅ и ❌."""
     kb = types.InlineKeyboardMarkup(row_width=2)
     buttons = []
     for i, task in enumerate(tasks, start=1):
-        # Если задача уже выполнена — кнопки "выполнить" не показываем
         if not task["done"]:
             buttons.append(types.InlineKeyboardButton(
                 text=f"✅ {i}",
@@ -76,27 +80,28 @@ def start(message):
         message.chat.id,
         f"Привет, {message.from_user.first_name}! 👋\n\n"
         "Я бот-задачник. Твои задачи видишь только ты 😉\n\n"
-        "➕ /add текст — добавить задачу\n"
-        "📋 /list — показать все задачи\n"
-        "🗑 /clear — удалить все задачи\n\n"
-        "А ещё можно нажимать кнопки под списком — попробуй!",
+        "Нажми «➕ Добавить задачу» — и я спрошу, что записать.\n"
+        "Или используй команды:\n"
+        "/add текст — добавить задачу\n"
+        "/list — показать все задачи\n"
+        "/clear — удалить все задачи",
         reply_markup=main_keyboard()
     )
 
 
-# ---------- /help ----------
 @bot.message_handler(commands=['help'])
 def help_command(message):
     start(message)
 
 
-# ---------- /add ----------
+# ---------- /add (командой) ----------
 @bot.message_handler(commands=['add'])
-def add_task(message):
+def add_task_cmd(message):
     text = message.text.replace("/add", "", 1).strip()
 
     if not text:
-        bot.send_message(message.chat.id, "⚠️ Напиши так: /add купить хлеб")
+        # Если написал /add без текста — переходим в диалог
+        ask_task_text(message)
         return
 
     tasks = get_user_tasks(message.from_user.id)
@@ -104,6 +109,47 @@ def add_task(message):
     save_user_tasks(message.from_user.id, tasks)
 
     bot.send_message(message.chat.id, f"✅ Добавлено: {text}")
+
+
+# ---------- Диалог: спросить текст задачи ----------
+def ask_task_text(message):
+    msg = bot.send_message(
+        message.chat.id,
+        "✏️ Что добавить? Напиши текст задачи одним сообщением.\n"
+        "Или нажми «❌ Отмена».",
+        reply_markup=cancel_keyboard()
+    )
+    bot.register_next_step_handler(msg, save_new_task)
+
+
+# ---------- Диалог: получить текст и сохранить ----------
+def save_new_task(message):
+    # Если пользователь отменил
+    if message.text == "❌ Отмена":
+        bot.send_message(
+            message.chat.id,
+            "Отменено 👌",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    # Пустое сообщение — маловероятно, но проверим
+    if not message.text or not message.text.strip():
+        bot.send_message(message.chat.id, "⚠️ Пустая задача. Попробуй ещё раз.")
+        ask_task_text(message)
+        return
+
+    text = message.text.strip()
+
+    tasks = get_user_tasks(message.from_user.id)
+    tasks.append({"text": text, "done": False})
+    save_user_tasks(message.from_user.id, tasks)
+
+    bot.send_message(
+        message.chat.id,
+        f"✅ Добавлено: {text}",
+        reply_markup=main_keyboard()
+    )
 
 
 # ---------- /list ----------
@@ -134,10 +180,9 @@ def clear_tasks(message):
     bot.send_message(message.chat.id, "🗑 Все твои задачи удалены.")
 
 
-# ---------- Обработка нажатий на inline-кнопки ----------
+# ---------- Inline-кнопки ----------
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
-    # call.data приходит в формате "done:2" или "delete:3"
     action, num_str = call.data.split(":")
     num = int(num_str)
 
@@ -163,7 +208,6 @@ def handle_callback(call):
         save_user_tasks(user_id, tasks)
         bot.answer_callback_query(call.id, f"❌ Удалено: {task['text']}")
 
-    # Обновляем сообщение со списком
     tasks = get_user_tasks(user_id)
 
     if not tasks:
@@ -187,21 +231,24 @@ def handle_callback(call):
     )
 
 
-# ---------- Reply-кнопки ----------
+# ---------- Reply-кнопки и обычный текст ----------
 @bot.message_handler(content_types=['text'])
 def handle_text(message):
     text = message.text
 
-    if text == "📋 Список":
+    if text == "➕ Добавить задачу":
+        ask_task_text(message)
+    elif text == "📋 Список":
         list_tasks(message)
     elif text == "🗑 Очистить всё":
         clear_tasks(message)
     else:
         bot.send_message(
             message.chat.id,
-            "Не понимаю 🤔 Используй команды: /add, /list, /clear"
+            "Не понимаю 🤔 Нажми «➕ Добавить задачу» или используй /list",
+            reply_markup=main_keyboard()
         )
 
 
-print("Бот с inline-кнопками запущен...")
+print("Бот с диалоговым режимом запущен...")
 bot.polling(none_stop=True)
